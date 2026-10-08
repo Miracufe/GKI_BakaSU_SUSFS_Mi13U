@@ -2,7 +2,7 @@ name: 自动构建 Xiaomi 13 Ultra BakaSU 内核
 
 on:
   schedule:
-    - cron: '0 3 * * 1'
+    - cron: '0 * * * *'  # 每小时自动检查一次是否有新提交，如有则即刻编译
   workflow_dispatch:
     inputs:
       force_build:

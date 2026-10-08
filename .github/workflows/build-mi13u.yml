@@ -171,3 +171,12 @@ jobs:
               --title "$TITLE" \
               --notes "$BODY"
           fi
+
+          # 输出直链到 Actions 运行摘要，避免用户从下方 Artifacts 下载二次套壳 zip
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG_NAME}"
+          DL_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/$(basename "$ZIP_FILE")"
+          echo "## 🎉 小米 13 Ultra 内核编译发布完成！" >> $GITHUB_STEP_SUMMARY
+          echo "👉 **单层刷机包直链（无需二次解压）**: [$(basename "$ZIP_FILE")]($DL_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "📦 **Release 页面**: [查看发布]($RELEASE_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "> 💡 提示：请直接点击上方直链下载。下方 Artifacts 列表是 GitHub 平台强制封装的外层容器 zip。" >> $GITHUB_STEP_SUMMARY
+

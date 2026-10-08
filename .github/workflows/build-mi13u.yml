@@ -1,0 +1,141 @@
+name: 自动构建 Xiaomi 13 Ultra BakaSU 内核
+
+    on:
+      # 支持定时触发（UTC 时间每天 03:00，即北京时间上午 11:00）
+      schedule:
+        - cron: '0 3 * * *'
+      # 支持手动一键运行
+      workflow_dispatch:
+        inputs:
+          force_build:
+            description: "强制构建（即使无新提交也构建）"
+            type: boolean
+            default: false
+          sub_level:
+            description: "内核子版本（默认 180）"
+            type: string
+            default: "180"
+          os_patch_level:
+            description: "安全补丁级别（默认 2025-05）"
+            type: string
+            default: "2025-05"
+          revision:
+            description: "修订号（默认 r15）"
+            type: string
+            default: "r15"
+          use_bbg:
+            description: "启用 BBG 防格机"
+            type: boolean
+            default: true
+          use_zram:
+            description: "启用 ZRAM 增强 (LZ4KD)"
+            type: boolean
+            default: false
+
+    permissions:
+      contents: write
+      actions: write
+
+    jobs:
+      check-update:
+        runs-on: ubuntu-latest
+        outputs:
+          should_build: ${{ steps.check.outputs.should_build }}
+          ksu_sha: ${{ steps.check.outputs.ksu_sha }}
+          ksu_short_sha: ${{ steps.check.outputs.ksu_short_sha }}
+          tag_name: ${{ steps.check.outputs.tag_name }}
+        steps:
+          - name: 检查 BakaSU 最新提交并比对 Releases
+            id: check
+            env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            run: |
+              # 1. 获取 BakaSU main 分支最新 SHA
+              KSU_SHA=$(git ls-remote --heads https://github.com/Baka-SU/BakaSU.git refs/heads/main | awk '{print $1}')
+              KSU_SHORT="${KSU_SHA:0:7}"
+              echo "BakaSU 最新提交: $KSU_SHORT"
+
+              # 2. 生成此版本的 Release 标签名
+              SUB="${{ inputs.sub_level || '180' }}"
+              PATCH="${{ inputs.os_patch_level || '2025-05' }}"
+              TAG_NAME="Mi13U-5.15.${SUB}-${PATCH}-${KSU_SHORT}"
+              echo "目标标签: $TAG_NAME"
+
+              # 3. 检查自己仓库中是否已存在该标签的 Release
+              TAG_EXISTS=$(gh release view "$TAG_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1 && echo "yes" || echo "no")
+
+              FORCE="${{ inputs.force_build || 'false' }}"
+              if [ "$FORCE" = "true" ] || [ "$TAG_EXISTS" = "no" ]; then
+                echo "检测到新提交或强制构建，触发编译！"
+                echo "should_build=true" >> $GITHUB_OUTPUT
+              else
+                echo "该提交版本已存在 Release，跳过本次构建。"
+                echo "should_build=false" >> $GITHUB_OUTPUT
+              fi
+
+              echo "ksu_sha=$KSU_SHA" >> $GITHUB_OUTPUT
+              echo "ksu_short_sha=$KSU_SHORT" >> $GITHUB_OUTPUT
+              echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      build:
+        needs: check-update
+        if: needs.check-update.outputs.should_build == 'true'
+        name: 构建 5.15.${{ inputs.sub_level || '180' }} (Xiaomi 13 Ultra)
+        uses: ./.github/workflows/build.yml
+        secrets: inherit
+        with:
+          clean_build: false
+          android_version: "android13"
+          kernel_version: "5.15"
+          sub_level: ${{ inputs.sub_level || '180' }}
+          os_patch_level: ${{ inputs.os_patch_level || '2025-05' }}
+          revision: ${{ inputs.revision || 'r15' }}
+          ksu_variant: "BakaSU"
+          ksu_branch: ${{ needs.check-update.outputs.ksu_sha }}
+          version: "Mi13Ultra"
+          use_zram: ${{ inputs.use_zram || false }}
+          use_bbg: ${{ inputs.use_bbg != false }}
+          use_rekernel: false
+          cve_2026_43499_patch: true
+          supp_op: false
+          enable_susfs: true
+          droidspaces: "off"
+          droidspaces_ntsync: false
+          build_bypass: false
+
+      publish-release:
+        needs: [check-update, build]
+        runs-on: ubuntu-latest
+        steps:
+          - name: 下载编译产物
+            uses: actions/download-artifact@v4
+            with:
+              path: ./artifacts
+
+          - name: 创建 GitHub Release 并发布 AnyKernel3 刷机包
+            env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              TAG_NAME: ${{ needs.check-update.outputs.tag_name }}
+              KSU_SHORT: ${{ needs.check-update.outputs.ksu_short_sha }}
+            run: |
+              ZIP_FILE=$(find ./artifacts -name "*AnyKernel3.zip" | head -n 1)
+              if [ -z "$ZIP_FILE" ]; then
+                echo "未找到 AnyKernel3 产物！"
+                exit 1
+              fi
+
+              TITLE="Xiaomi 13 Ultra BakaSU GKI 内核 (BakaSU @ ${KSU_SHORT})"
+              BODY="### 小米 13 Ultra (ishtar) 专用 BakaSU + SUSFS 内核
+              - **内核系列**: android13-5.15.${{ inputs.sub_level || '180' }}
+              - **安全补丁**: ${{ inputs.os_patch_level || '2025-05' }}
+              - **BakaSU Commit**: [${KSU_SHORT}](https://github.com/Baka-SU/BakaSU/commit/${{ needs.check-update.outputs.ksu_sha }})
+              - **SUSFS**: 已启用
+              - **构建日期**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+              > ⚠️ **刷入提示**：刷入前请务必备份官方 boot.img！"
+
+              # 创建 Release 并上传文件
+              gh release create "$TAG_NAME" "$ZIP_FILE" \
+                --repo "${{ github.repository }}" \
+                --title "$TITLE" \
+                --notes "$BODY"

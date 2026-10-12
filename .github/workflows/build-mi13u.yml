@@ -77,15 +77,27 @@ jobs:
             TAG_EXISTS="yes"
           fi
 
+          FAIL_TAG="failed-${TAG_NAME}"
+          PREV_FAILED="no"
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$FAIL_TAG" >/dev/null 2>&1; then
+            PREV_FAILED="yes"
+          fi
+
           FORCE="${{ inputs.force_build }}"
           [ -z "$FORCE" ] && FORCE="false"
 
-          if [ "$FORCE" = "true" ] || [ "$TAG_EXISTS" = "no" ]; then
-            echo "检测到新提交或强制构建，触发编译！"
+          if [ "$FORCE" = "true" ]; then
+            echo "强制构建已触发！"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
-          else
+          elif [ "$TAG_EXISTS" = "yes" ]; then
             echo "该提交版本已存在 Release，跳过本次构建。"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
+          elif [ "$PREV_FAILED" = "yes" ]; then
+            echo "该提交 ($KSU_SHORT) 此前构建失败 ($FAIL_TAG)，跳过每小时自动重试以节省 Actions 配额。如需重新构建请手动勾选 force_build 触发。"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "检测到新提交，触发编译！"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
           echo "ksu_sha=$KSU_SHA" >> "$GITHUB_OUTPUT"
@@ -179,4 +191,23 @@ jobs:
           echo "👉 **单层刷机包直链（无需二次解压）**: [$(basename "$ZIP_FILE")]($DL_URL)" >> $GITHUB_STEP_SUMMARY
           echo "📦 **Release 页面**: [查看发布]($RELEASE_URL)" >> $GITHUB_STEP_SUMMARY
           echo "> 💡 提示：请直接点击上方直链下载。下方 Artifacts 列表是 GitHub 平台强制封装的外层容器 zip。" >> $GITHUB_STEP_SUMMARY
+
+          # 如果此前存在构建失败标记，发布成功后将其清理
+          FAIL_TAG="failed-${TAG_NAME}"
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$FAIL_TAG" >/dev/null 2>&1 || true
+
+  mark-failure:
+    needs: [check-update, build]
+    if: always() && needs.check-update.outputs.should_build == 'true' && needs.build.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 标记本次构建失败
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FAIL_TAG: failed-${{ needs.check-update.outputs.tag_name }}
+        run: |
+          echo "记录构建失败标记: $FAIL_TAG"
+          gh api "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$FAIL_TAG" -f sha="${{ github.sha }}" >/dev/null 2>&1 || true
 

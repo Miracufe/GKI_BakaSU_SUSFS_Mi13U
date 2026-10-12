@@ -628,6 +628,10 @@ jobs:
               ;;
             "Next"|"SukiSU"|"BakaSU")
               echo "Next/SukiSU/BakaSU 使用内置 SUSFS 支持"
+              if [ -f "KernelSU/kernel/tools/susfs_compat.mk" ]; then
+                echo "移除 BakaSU 上游硬编码的 SUSFS 熔断阻断..."
+                sed -i '/Please wait susfs update/d' KernelSU/kernel/tools/susfs_compat.mk
+              fi
               ;;
           esac
 

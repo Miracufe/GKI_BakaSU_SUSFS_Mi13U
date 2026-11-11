@@ -10,17 +10,17 @@ on:
         type: boolean
         default: false
       sub_level:
-        description: "内核子版本（默认 180）"
+        description: "内核子版本（默认 224）"
         type: string
-        default: "180"
+        default: "224"
       os_patch_level:
-        description: "安全补丁级别（默认 2025-05）"
+        description: "安全补丁级别（默认 2026-10）"
         type: string
-        default: "2025-05"
+        default: "2026-10"
       revision:
-        description: "修订号（默认 r15）"
+        description: "修订号（默认留空）"
         type: string
-        default: "r15"
+        default: ""
       use_bbg:
         description: "启用 BBG 防格机"
         type: boolean
@@ -59,11 +59,11 @@ jobs:
           echo "BakaSU 最新提交: $KSU_SHORT"
 
           SUB="${{ inputs.sub_level }}"
-          [ -z "$SUB" ] && SUB="180"
+          [ -z "$SUB" ] && SUB="224"
           PATCH="${{ inputs.os_patch_level }}"
-          [ -z "$PATCH" ] && PATCH="2025-05"
+          [ -z "$PATCH" ] && PATCH="2026-10"
           REV="${{ inputs.revision }}"
-          [ -z "$REV" ] && REV="r15"
+          [ -z "$REV" ] && REV=""
           BBG="${{ inputs.use_bbg }}"
           [ -z "$BBG" ] && BBG="true"
           ZRAM="${{ inputs.use_zram }}"

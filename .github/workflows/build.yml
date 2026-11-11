@@ -378,9 +378,14 @@ jobs:
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-6.4.1.git gcc
 
           FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
-          echo "初始化 repo，分支: common-${FORMATTED_BRANCH}"
+          MANIFEST_BRANCH="common-${FORMATTED_BRANCH}"
+          if [ -z "$(retry 4 15 git ls-remote --heads https://android.googlesource.com/kernel/manifest "refs/heads/${MANIFEST_BRANCH}")" ]; then
+            echo "Manifest 分支 ${MANIFEST_BRANCH} 在上游不存在，回退到 common-${{ inputs.android_version }}-${{ inputs.kernel_version }}-lts"
+            MANIFEST_BRANCH="common-${{ inputs.android_version }}-${{ inputs.kernel_version }}-lts"
+          fi
+          echo "初始化 repo，分支: ${MANIFEST_BRANCH}"
 
-          retry 4 15 "$REPO" init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "common-${FORMATTED_BRANCH}" --repo-rev=v2.16
+          retry 4 15 "$REPO" init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_BRANCH}" --repo-rev=v2.16
 
           # 检查是否为已弃用的分支
           REMOTE_BRANCH=$(retry 4 15 git ls-remote --heads https://android.googlesource.com/kernel/common "refs/heads/${FORMATTED_BRANCH}")
@@ -401,29 +406,51 @@ jobs:
           elif [ -z "$REMOTE_BRANCH" ] && [ -n "$(retry 4 15 git ls-remote --heads https://android.googlesource.com/kernel/common "refs/heads/deprecated/${FORMATTED_BRANCH}")" ]; then
             echo "检测到已弃用的分支: $FORMATTED_BRANCH"
             sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" $DEFAULT_MANIFEST_PATH
-          elif [ -z "$REMOTE_BRANCH" ]; then
+          elif [ -z "$REMOTE_BRANCH" ] && [ "${{ inputs.os_patch_level }}" != "lts" ]; then
             # 上游可能删除日期分支，但仍保留该月份的发布 tag。
             TAG_REFS=$(retry 4 15 git ls-remote --tags --refs https://android.googlesource.com/kernel/common "refs/tags/${FORMATTED_BRANCH}_r*")
-            if [ -z "$TAG_REFS" ]; then
-              echo "::error::未找到 $FORMATTED_BRANCH 分支或对应的发布 tag" >&2
-              exit 1
-            fi
-            RELEASE_TAG=$(printf '%s\n' "$TAG_REFS" | awk '{print $2}' | sed 's|^refs/tags/||' | sort -V | tail -n1)
-            echo "分支已删除，改用发布 tag: $RELEASE_TAG"
-            sed -i "s|revision=\"${FORMATTED_BRANCH}\"|revision=\"refs/tags/${RELEASE_TAG}\"|" "$DEFAULT_MANIFEST_PATH"
-            if ! grep -qF "revision=\"refs/tags/${RELEASE_TAG}\"" "$DEFAULT_MANIFEST_PATH"; then
-              echo "::error::未能在 manifest 中设置 kernel/common 的发布 tag" >&2
-              exit 1
+            if [ -n "$TAG_REFS" ]; then
+              RELEASE_TAG=$(printf '%s\n' "$TAG_REFS" | awk '{print $2}' | sed 's|^refs/tags/||' | sort -V | tail -n1)
+              echo "分支已删除，改用发布 tag: $RELEASE_TAG"
+              sed -i "s|revision=\"[^\"]*\"|revision=\"refs/tags/${RELEASE_TAG}\"|" "$DEFAULT_MANIFEST_PATH"
+              if ! grep -qF "revision=\"refs/tags/${RELEASE_TAG}\"" "$DEFAULT_MANIFEST_PATH"; then
+                echo "::error::未能在 manifest 中设置 kernel/common 的发布 tag" >&2
+                exit 1
+              fi
+            else
+              LTS_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-lts"
+              echo "未找到 $FORMATTED_BRANCH 对应分支或 tag，回退使用 LTS 分支: $LTS_BRANCH"
+              sed -i "s|revision=\"[^\"]*\"|revision=\"$LTS_BRANCH\"|" "$DEFAULT_MANIFEST_PATH"
+              REMOTE_BRANCH="refs/heads/$LTS_BRANCH"
             fi
           fi
 
           retry 3 30 "$REPO" --trace sync -c "-j$(nproc --all)" --no-tags --fail-fast
-          if [ -n "${RELEASE_TAG:-}" ]; then
-            ACTUAL_SUBLEVEL=$(awk '/^SUBLEVEL = / {print $3; exit}' common/Makefile)
-            if [ "$ACTUAL_SUBLEVEL" != "${{ inputs.sub_level }}" ]; then
-              echo "::error::${RELEASE_TAG} 的子版本号为 $ACTUAL_SUBLEVEL，预期为 ${{ inputs.sub_level }}" >&2
-              exit 1
+          ACTUAL_SUBLEVEL=$(awk '/^SUBLEVEL = / {print $3; exit}' common/Makefile)
+          echo "当前代码树内核子版本: $ACTUAL_SUBLEVEL (目标: ${{ inputs.sub_level }})"
+          if [ -n "${RELEASE_TAG:-}" ] && [ "$ACTUAL_SUBLEVEL" != "${{ inputs.sub_level }}" ]; then
+            echo "::error::${RELEASE_TAG} 的子版本号为 $ACTUAL_SUBLEVEL，预期为 ${{ inputs.sub_level }}" >&2
+            exit 1
+          elif [ -z "${RELEASE_TAG:-}" ] && [ "$ACTUAL_SUBLEVEL" != "${{ inputs.sub_level }}" ]; then
+            echo "当前代码树子版本 ($ACTUAL_SUBLEVEL) 与预期 (${{ inputs.sub_level }}) 不一致，尝试从 upstream-linux 分支同步..."
+            cd common
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            if git fetch --depth=100 https://android.googlesource.com/kernel/common refs/heads/upstream-linux-${{ inputs.kernel_version }}.y:refs/remotes/origin/upstream-lts; then
+              UPSTREAM_COMMIT=$(git log --grep="Linux ${{ inputs.kernel_version }}.${{ inputs.sub_level }}$" -n 1 --format="%H" refs/remotes/origin/upstream-lts)
+              if [ -n "$UPSTREAM_COMMIT" ]; then
+                echo "找到上游提交 $UPSTREAM_COMMIT (Linux ${{ inputs.kernel_version }}.${{ inputs.sub_level }})，正在合并..."
+                git merge "$UPSTREAM_COMMIT" --no-edit || {
+                  echo "::warning::合并上游提交冲突，取消合并并保留基础代码"
+                  git merge --abort || true
+                }
+              else
+                echo "未在 upstream 分支找到 Linux ${{ inputs.kernel_version }}.${{ inputs.sub_level }} 提交"
+              fi
             fi
+            ACTUAL_SUBLEVEL=$(awk '/^SUBLEVEL = / {print $3; exit}' Makefile)
+            echo "合并后内核子版本: $ACTUAL_SUBLEVEL"
+            cd ..
           fi
           echo "REMOTE_BRANCH=$REMOTE_BRANCH" >> $GITHUB_ENV
 

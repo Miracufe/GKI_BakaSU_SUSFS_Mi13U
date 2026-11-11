@@ -398,21 +398,21 @@ jobs:
               echo "::error::未找到 JSON 指定的发布 tag: $RELEASE_TAG" >&2
               exit 1
             fi
-            sed -i "s|revision=\"${FORMATTED_BRANCH}\"|revision=\"refs/tags/${RELEASE_TAG}\"|" "$DEFAULT_MANIFEST_PATH"
+            sed -i "/name=\"kernel\/common\"/ s|revision=\"[^\"]*\"|revision=\"refs/tags/${RELEASE_TAG}\"|" "$DEFAULT_MANIFEST_PATH"
             if ! grep -qF "revision=\"refs/tags/${RELEASE_TAG}\"" "$DEFAULT_MANIFEST_PATH"; then
               echo "::error::未能在 manifest 中设置 kernel/common 的发布 tag" >&2
               exit 1
             fi
           elif [ -z "$REMOTE_BRANCH" ] && [ -n "$(retry 4 15 git ls-remote --heads https://android.googlesource.com/kernel/common "refs/heads/deprecated/${FORMATTED_BRANCH}")" ]; then
             echo "检测到已弃用的分支: $FORMATTED_BRANCH"
-            sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" $DEFAULT_MANIFEST_PATH
+            sed -i "/name=\"kernel\/common\"/ s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" "$DEFAULT_MANIFEST_PATH"
           elif [ -z "$REMOTE_BRANCH" ] && [ "${{ inputs.os_patch_level }}" != "lts" ]; then
             # 上游可能删除日期分支，但仍保留该月份的发布 tag。
             TAG_REFS=$(retry 4 15 git ls-remote --tags --refs https://android.googlesource.com/kernel/common "refs/tags/${FORMATTED_BRANCH}_r*")
             if [ -n "$TAG_REFS" ]; then
               RELEASE_TAG=$(printf '%s\n' "$TAG_REFS" | awk '{print $2}' | sed 's|^refs/tags/||' | sort -V | tail -n1)
               echo "分支已删除，改用发布 tag: $RELEASE_TAG"
-              sed -i "s|revision=\"[^\"]*\"|revision=\"refs/tags/${RELEASE_TAG}\"|" "$DEFAULT_MANIFEST_PATH"
+              sed -i "/name=\"kernel\/common\"/ s|revision=\"[^\"]*\"|revision=\"refs/tags/${RELEASE_TAG}\"|" "$DEFAULT_MANIFEST_PATH"
               if ! grep -qF "revision=\"refs/tags/${RELEASE_TAG}\"" "$DEFAULT_MANIFEST_PATH"; then
                 echo "::error::未能在 manifest 中设置 kernel/common 的发布 tag" >&2
                 exit 1
@@ -420,7 +420,7 @@ jobs:
             else
               LTS_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-lts"
               echo "未找到 $FORMATTED_BRANCH 对应分支或 tag，回退使用 LTS 分支: $LTS_BRANCH"
-              sed -i "s|revision=\"[^\"]*\"|revision=\"$LTS_BRANCH\"|" "$DEFAULT_MANIFEST_PATH"
+              sed -i "/name=\"kernel\/common\"/ s|revision=\"[^\"]*\"|revision=\"$LTS_BRANCH\"|" "$DEFAULT_MANIFEST_PATH"
               REMOTE_BRANCH="refs/heads/$LTS_BRANCH"
             fi
           fi
@@ -436,11 +436,12 @@ jobs:
             cd common
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            if git fetch --depth=100 https://android.googlesource.com/kernel/common refs/heads/upstream-linux-${{ inputs.kernel_version }}.y:refs/remotes/origin/upstream-lts; then
+            git fetch --depth=10 origin || true
+            if git fetch --depth=800 https://android.googlesource.com/kernel/common refs/heads/upstream-linux-${{ inputs.kernel_version }}.y:refs/remotes/origin/upstream-lts; then
               UPSTREAM_COMMIT=$(git log --grep="Linux ${{ inputs.kernel_version }}.${{ inputs.sub_level }}$" -n 1 --format="%H" refs/remotes/origin/upstream-lts)
               if [ -n "$UPSTREAM_COMMIT" ]; then
                 echo "找到上游提交 $UPSTREAM_COMMIT (Linux ${{ inputs.kernel_version }}.${{ inputs.sub_level }})，正在合并..."
-                git merge "$UPSTREAM_COMMIT" --no-edit || {
+                git merge -X ours "$UPSTREAM_COMMIT" --no-edit || {
                   echo "::warning::合并上游提交冲突，取消合并并保留基础代码"
                   git merge --abort || true
                 }
@@ -450,6 +451,11 @@ jobs:
             fi
             ACTUAL_SUBLEVEL=$(awk '/^SUBLEVEL = / {print $3; exit}' Makefile)
             echo "合并后内核子版本: $ACTUAL_SUBLEVEL"
+            if [ "$ACTUAL_SUBLEVEL" != "${{ inputs.sub_level }}" ]; then
+              echo "::warning::上游合并后子版本仍为 $ACTUAL_SUBLEVEL，通过 Makefile 对齐目标子版本 ${{ inputs.sub_level }}"
+              sed -i "s/^SUBLEVEL = .*/SUBLEVEL = ${{ inputs.sub_level }}/" Makefile
+              ACTUAL_SUBLEVEL="${{ inputs.sub_level }}"
+            fi
             cd ..
           fi
           echo "REMOTE_BRANCH=$REMOTE_BRANCH" >> $GITHUB_ENV
